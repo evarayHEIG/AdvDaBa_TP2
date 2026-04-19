@@ -1,0 +1,42 @@
+# --- Java / Maven ---
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.log
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+
+# --- Metals / Scala tooling (present in repo) ---
+.metals/
+.bloop/
+.ammonite/
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Env / local secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Docker runtime / local volumes ---
+neo4j_mount/data/
+neo4j_mount/logs/
+
+# Optional: ignore local runtime traces if generated
+# neo4j_mount/conf/*.bak
+
+# --- Misc local outputs ---
+*.tmp
+*.swp
+*.swo

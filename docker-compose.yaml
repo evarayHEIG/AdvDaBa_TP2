@@ -4,9 +4,6 @@ services:
     ports:
       - "7474:7474"
       - "7687:7687"
-    networks:
-      internal:
-        ipv4_address: 172.24.0.10
     volumes:
       - $PWD/neo4j_mount/data:/data
       - $PWD/neo4j_mount/logs:/logs
@@ -22,22 +19,14 @@ services:
     image: neo4jtp:latest
     depends_on:
       - db
-    networks:
-      - internal
     volumes:
       - $PWD/dblpExample.jsonl:/file.jsonl
     environment:
-      - JSON_FILE=/file.jsonl
+      #- JSON_FILE=http://vmrum.isc.heia-fr.ch/files/test.jsonl
+      - JSON_FILE=http://vmrum.isc.heia-fr.ch/files/DBLP-Citation-network-V18.jsonl
       - MAX_NODES=10000
-      - NEO4J_IP=172.24.0.10 # must be the same as above
+      - NEO4J_IP=db
     deploy:
       resources:
         limits:
           memory: 4g
-
-networks:
-  internal:
-    ipam:
-      driver: default
-      config:
-        - subnet: "172.24.0.0/24"
