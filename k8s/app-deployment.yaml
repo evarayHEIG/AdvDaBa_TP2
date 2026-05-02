@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: app-ray-ste-adv-daba-26
+  name: app
   namespace: ray-ste-adv-daba-26
   labels:
     app: advdb-app
