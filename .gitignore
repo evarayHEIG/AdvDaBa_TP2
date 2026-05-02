@@ -6,6 +6,8 @@ target/
 *.ear
 *.log
 
+local.yaml
+
 # --- IDE / Editor ---
 .vscode/
 .idea/

@@ -24,10 +24,10 @@ services:
     environment:
       #- JSON_FILE=http://vmrum.isc.heia-fr.ch/files/test.jsonl
       - JSON_FILE=http://vmrum.isc.heia-fr.ch/files/DBLP-Citation-network-V18.jsonl
-      - MAX_NODES=10000
-      - BATCH_SIZE=5000
+      - MAX_NODES=1000000
+      - BATCH_SIZE=15000
       - NEO4J_IP=db
     deploy:
       resources:
         limits:
-          memory: 4g
+          memory: 3g
