@@ -1,8 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: neo4j
-  namespace: advdb
+  name: neo4j-ray-ste-adv-daba-26
+  namespace: ray-ste-adv-daba-26
   labels:
     app: neo4j
 spec:

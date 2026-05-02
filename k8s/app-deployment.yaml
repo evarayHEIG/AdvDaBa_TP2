@@ -1,8 +1,8 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: app
-  namespace: advdb
+  name: app-ray-ste-adv-daba-26
+  namespace: ray-ste-adv-daba-26
   labels:
     app: advdb-app
 spec:
@@ -15,7 +15,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: app
-        image: neo4jtp:latest
+        image: ghcr.io/evarayheig/advdaba-tp2:3b7920a518cf3eced3359c0b49d06e3fdc41adb2
         imagePullPolicy: IfNotPresent
         envFrom:
         - configMapRef:
