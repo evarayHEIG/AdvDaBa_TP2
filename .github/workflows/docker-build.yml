@@ -18,12 +18,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      - name: Lowercase Repository Name
+        id: repo_name
+        run: |
+          echo "image_name=$(echo ${{ github.repository_owner }}/advdaba-tp2 | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Set up JDK 11
         uses: actions/setup-java@v3
-        with:
-          java-version: '11'
-          distribution: 'temurin'
-          cache: maven
+        # ... (votre config Java)
 
       - name: Build with Maven
         run: mvn clean package -DskipTests -q
@@ -43,6 +45,7 @@ jobs:
         with:
           context: .
           push: true
+          # --- MODIFIEZ LES TAGS ICI ---
           tags: |
-            ghcr.io/${{ github.repository_owner | downcase }}/advdaba-tp2:latest
-            ghcr.io/${{ github.repository_owner | downcase }}/advdaba-tp2:${{ github.sha }}
+            ghcr.io/${{ steps.repo_name.outputs.image_name }}:latest
+            ghcr.io/${{ steps.repo_name.outputs.image_name }}:${{ github.sha }}
