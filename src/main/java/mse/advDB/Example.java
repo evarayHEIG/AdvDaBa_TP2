@@ -235,18 +235,22 @@ public class Example {
                         String articleId = obj.getString("id", null);
                         if (articleId == null || articleId.isEmpty()) continue;
 
+                        Map<String, Object> row = new HashMap<>();
+                        row.put("id", articleId);
+
+                        // Prepare references
+                        List<String> referenceRows = new ArrayList<>();
                         JsonArray references = obj.getJsonArray("references");
                         if (references != null) {
                             for (JsonValue rv : references) {
                                 String refId = ((JsonString) rv).getString();
                                 if (!refId.isEmpty()) {
-                                    Map<String, Object> refRow = new HashMap<>();
-                                    refRow.put("from", articleId);
-                                    refRow.put("to", refId);
-                                    batch.add(refRow);  // one row per pair, not per article
+                                    referenceRows.add(refId);
                                 }
                             }
                         }
+                        row.put("references", referenceRows);
+                        batch.add(row);
 
                         articleCount++;
                         if (articleCount % batchSize == 0) {
@@ -266,10 +270,10 @@ public class Example {
                     
                     // Signal end of stream
                     queue2.put(END_OF_STREAM);
-                    logger.info("[PASS 2 Producer] Finished reading, sent {} articles", articleCount);
+                    logger.info("[PASS 1 Producer] Finished reading, sent {} articles", articleCount);
                 }
             } catch (Exception e) {
-                logger.error("Error in PASS 2 Producer: {}", e.getMessage());
+                logger.error("Error in PASS 1 Producer: {}", e.getMessage());
                 e.printStackTrace();
             }
         });
@@ -293,14 +297,8 @@ public class Example {
                         logger.info("[PASS 2 Consumer] Committed {} batches ({} references)", batchCount, totalReferencesCommitted);
                     }
                 }
-                
-                // Clean up articles without title
-                session.writeTransaction(tx -> {
-                    tx.run("MATCH (a:Article) WHERE a.title IS NULL DETACH DELETE a");
-                    return null;
-                });
             } catch (Exception e) {
-                logger.error("Error in PASS 2 Consumer: {}", e.getMessage());
+                logger.error("Error in PASS 2 Producer: {}", e.getMessage());
                 e.printStackTrace();
             }
         });
@@ -383,19 +381,32 @@ public class Example {
      * PASS 2: Create reference relations (CITES) only if target article exists
      */
     private static void flushBatchPass2(Session session, List<Map<String, Object>> batchRows) {
-    if (batchRows.isEmpty()) {
-        return;
-    }
+        if (batchRows.isEmpty()) {
+            return;
+        }
 
-    session.writeTransaction(tx -> {
-        String query = "UNWIND $rows AS row " +
-                       "MATCH (a:Article {_id: row.from}) " +
-                       "MATCH (target:Article {_id: row.to}) " +
-                       "MERGE (a)-[:CITES]->(target)";
-        tx.run(query, parameters("rows", batchRows));
-        return null;
-    });
-}
+        session.writeTransaction(tx -> {
+            String query = new StringBuilder()
+                .append("UNWIND $rows AS row ")
+                .append("MATCH (a:Article {_id: row.id}) ")
+                .append("WITH a, row ")
+                .append("CALL { ")
+                .append("  WITH a, row ")
+                .append("  UNWIND coalesce(row.references, []) AS refId ")
+                .append("  MATCH (target:Article {_id: refId}) ")
+                .append("  MERGE (a)-[:CITES]->(target) ")
+                .append("  RETURN count(*) AS refWrites ")
+                .append("} ")
+                .append("RETURN count(*) AS processed")
+                .toString();
+
+            tx.run(
+                query,
+                parameters("rows", batchRows)
+            );
+            return null;
+        });
+    }
 
     /**
      * Generate an author ID if missing. Format: AUTHOR_<hash of name+org>
