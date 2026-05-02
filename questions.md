@@ -1,5 +1,7 @@
-- max node c'est en tout ou seulement le nombre de lignes lues dans le fichier ?
-- est-ce qu'on prend toutes les infos des article/ auteurs?
+- max node c'est en tout ou seulement le nombre de lignes lues dans le fichier ? ne pas limiter, prendre tout le dataset
+- est-ce qu'on prend toutes les infos des articles/ auteurs? non
+- ordre de grandeur de temps? 
+- references d'articles n'exitant pas? faire un choix
 - 2 méthodes: passer 2 fois sur le fichier (une fois pour récupérer tous les ids des articles, une fois pour faire les relations que avec les articles existants) ou faire un seul passage et effacer les articles non existants à la fin.
 ```json
 {
@@ -54,4 +56,9 @@
 }
 ```
 - réfléchir au déploiement kubernetes
-
+- environ 2 millions de lignes de logs
+- voir quoi faire des auteurs sans id: soit les ignorer, soit les ajouter avec un id généré
+- vérifier si le scaling a l'air linéaire?
+- klogg -> ne charge pas tout le fichier en mémoire, permet de faire des recherches rapides
+- 6'729'000 lignes dans le fichier
+- merge peut être lent -> pas sûr que ça se scale linéairement.

@@ -15,12 +15,15 @@ import jakarta.json.JsonValue;
 
 import java.io.BufferedReader;
 import java.io.FileInputStream;
-import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.StringReader;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import java.net.URL;
 
@@ -33,6 +36,8 @@ public class Example {
         System.out.println("Path to JSON file is " + jsonPath);
         int nbArticles = Integer.max(1000,Integer.parseInt(System.getenv("MAX_NODES")));
         System.out.println("Number of articles to consider is " + nbArticles);
+        int batchSize = Integer.max(1, Integer.parseInt(System.getenv().getOrDefault("BATCH_SIZE", "1000")));
+        System.out.println("Batch size is " + batchSize);
         String neo4jIP = System.getenv("NEO4J_IP");
         System.out.println("IP addresss of neo4j server is " + neo4jIP);
 
@@ -75,6 +80,7 @@ public class Example {
         System.out.println("Loading started at instant: " + startTime);
 
         int articleCount = 0;
+        List<Map<String, Object>> batchRows = new ArrayList<>(batchSize);
 
         try (Session session = driver.session();
              BufferedReader br = new BufferedReader(new InputStreamReader(inputStream))) {
@@ -97,16 +103,12 @@ public class Example {
 
                 if (articleId == null || articleId.isEmpty()) continue;
 
-                // MERGE Article node
-                session.writeTransaction(tx -> {
-                    tx.run(
-                        "MERGE (a:Article {_id: $id}) SET a.title = $title",
-                        parameters("id", articleId, "title", title)
-                    );
-                    return null;
-                });
+                Map<String, Object> row = new HashMap<>();
+                row.put("id", articleId);
+                row.put("title", title);
 
-                // MERGE Authors nodes + relation AUTHORED
+                // Prepare authors data for a batched UNWIND query
+                List<Map<String, String>> authorRows = new ArrayList<>();
                 JsonArray authors = obj.getJsonArray("authors");
                 if (authors != null) {
                     for (JsonValue av : authors) {
@@ -116,56 +118,48 @@ public class Example {
 
                         if (authorId == null || authorId.isEmpty()) continue;
 
-                        session.writeTransaction(tx -> {
-                            tx.run(
-                                "MERGE (au:Author {_id: $authorId}) " +
-                                "  SET au.name = $name " +
-                                "WITH au " +
-                                "MATCH (a:Article {_id: $articleId}) " +
-                                "MERGE (au)-[:AUTHORED]->(a)",
-                                parameters(
-                                    "authorId",   authorId,
-                                    "name",       authorName,
-                                    "articleId",  articleId
-                                )
-                            );
-                            return null;
-                        });
+                        Map<String, String> authorRow = new HashMap<>();
+                        authorRow.put("id", authorId);
+                        authorRow.put("name", authorName);
+                        authorRows.add(authorRow);
                     }
                 }
+                row.put("authors", authorRows);
 
-                // MERGE cited Articles + relation CITES
+                // Prepare references data for a batched UNWIND query
+                List<String> referenceRows = new ArrayList<>();
                 JsonArray references = obj.getJsonArray("references");
                 if (references != null) {
                     for (JsonValue rv : references) {
                         String refId = ((JsonString) rv).getString();
                         if (refId.isEmpty()) continue;
 
-                        final String fRefId = refId;
-                        session.writeTransaction(tx -> {
-                            tx.run(
-                                "MERGE (target:Article {_id: $refId}) " +
-                                "WITH target " +
-                                "MATCH (src:Article {_id: $srcId}) " +
-                                "MERGE (src)-[:CITES]->(target)",
-                                parameters("refId", fRefId, "srcId", articleId)
-                            );
-                            return null;
-                        });
+                        referenceRows.add(refId);
                     }
                 }
+                row.put("references", referenceRows);
+
+                batchRows.add(row);
 
                 articleCount++;
                 if (articleCount % 500 == 0) {
                     System.out.println("Processed " + articleCount + " articles...");
                 }
+
+                if (batchRows.size() >= batchSize) {
+                    flushBatch(session, batchRows);
+                    batchRows.clear();
+                }
             }
 
+            // Flush remaining rows
+            flushBatch(session, batchRows);
+
             // Clean up articles without title (if any)
-            /*session.writeTransaction(tx -> {
+            session.writeTransaction(tx -> {
                 tx.run("MATCH (a:Article) WHERE a.title IS NULL DETACH DELETE a");
                 return null;
-            });*/
+            });
         }
 
         // Final stats
@@ -193,5 +187,42 @@ public class Example {
         }
 
     driver.close();
+    }
+
+    private static void flushBatch(Session session, List<Map<String, Object>> batchRows) {
+        if (batchRows.isEmpty()) {
+            return;
+        }
+
+        session.writeTransaction(tx -> {
+            String query = new StringBuilder()
+                .append("UNWIND $rows AS row")
+                .append("MERGE (a:Article {_id: row.id})")
+                .append("SET a.title = row.title")
+                .append("WITH a, row")
+                .append("CALL {")
+                .append("  WITH a, row")
+                .append("  UNWIND coalesce(row.authors, []) AS author")
+                .append("  MERGE (au:Author {_id: author.id})")
+                .append("  SET au.name = author.name")
+                .append("  MERGE (au)-[:AUTHORED]->(a)")
+                .append("  RETURN count(*) AS authorWrites")
+                .append("}")
+                .append("CALL {")
+                .append("  WITH a, row")
+                .append("  UNWIND coalesce(row.references, []) AS refId")
+                .append("  MERGE (target:Article {_id: refId})")
+                .append("  MERGE (a)-[:CITES]->(target)")
+                .append("  RETURN count(*) AS referenceWrites")
+                .append("}")
+                .append("RETURN count(*) AS processed")
+                .toString();
+
+            tx.run(
+                query,
+                parameters("rows", batchRows)
+            );
+            return null;
+        });
     }
 }

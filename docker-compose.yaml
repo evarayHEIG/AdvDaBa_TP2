@@ -25,6 +25,7 @@ services:
       #- JSON_FILE=http://vmrum.isc.heia-fr.ch/files/test.jsonl
       - JSON_FILE=http://vmrum.isc.heia-fr.ch/files/DBLP-Citation-network-V18.jsonl
       - MAX_NODES=10000
+      - BATCH_SIZE=5000
       - NEO4J_IP=db
     deploy:
       resources:
