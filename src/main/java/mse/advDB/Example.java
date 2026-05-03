@@ -239,17 +239,17 @@ public class Example {
                         row.put("id", articleId);
 
                         // Prepare references
-                        List<String> referenceRows = new ArrayList<>();
+                        Set<String> refs = new HashSet<>();
                         JsonArray references = obj.getJsonArray("references");
                         if (references != null) {
                             for (JsonValue rv : references) {
                                 String refId = ((JsonString) rv).getString();
-                                if (!refId.isEmpty()) {
-                                    referenceRows.add(refId);
+                                if (refId != null && !refId.isEmpty()) {
+                                    refs.add(refId);
                                 }
                             }
                         }
-                        row.put("references", referenceRows);
+                        row.put("references", new ArrayList<>(refs));
                         batch.add(row);
 
                         articleCount++;
@@ -391,7 +391,7 @@ public class Example {
                 "MATCH (a:Article {_id: row.id}) " +
                 "UNWIND row.references AS refId " +
                 "MATCH (t:Article {_id: refId}) " +
-                "MERGE (a)-[:CITES]->(t)";
+                "CREATE (a)-[:CITES]->(t)";
 
             tx.run(
                 query,
