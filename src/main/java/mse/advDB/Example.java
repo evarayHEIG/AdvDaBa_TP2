@@ -299,18 +299,13 @@ public class Example {
 
         /** Parses a JSON line; returns null and logs a warning on failure. */
         private static JsonObject parseLine(String line) {
-        if (line == null || line.isBlank()) {
-            return null;
-        }
-
-        try (StringReader sr = new StringReader(line);
-            JsonReader reader = Json.createReader(sr)) {
-
-            return reader.readObject();
-
-        } catch (Exception e) {
-            logger.warn("Skipping malformed JSON line: {}", e.getMessage());
-            return null;
+            if (line == null || line.isBlank()) return null;
+            try (JsonReader reader = JSON_READER_FACTORY.createReader(new StringReader(line))) {
+                return reader.readObject();
+            } catch (Exception e) {
+                logger.warn("Skipping malformed JSON line: {}", e.getMessage());
+                return null;
+            }
         }
     }
 
