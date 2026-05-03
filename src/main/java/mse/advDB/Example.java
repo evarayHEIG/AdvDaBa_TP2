@@ -101,7 +101,7 @@ public class Example {
     private static void runPass1(Driver driver, String jsonPath, int nbArticles, int batchSize)
             throws InterruptedException {
         logger.info("=== PASS 1: Creating Articles, Authors and AUTHORED relations ===");
-        BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(batchSize);
+        BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(2);
 
         Thread producer = new Thread(() -> {
             try (BufferedReader br = openReader(jsonPath)) {
@@ -211,7 +211,7 @@ public class Example {
     private static void runPass2(Driver driver, String jsonPath, int nbArticles, int batchSize)
             throws InterruptedException {
         logger.info("=== PASS 2: Creating CITES relations ===");
-        BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(batchSize);
+        BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(2);
 
         Thread producer = new Thread(() -> {
             try (BufferedReader br = openReader(jsonPath)) {
