@@ -101,7 +101,7 @@ public class Example {
     private static void runPass1(Driver driver, String jsonPath, int nbArticles, int batchSize)
             throws InterruptedException {
         logger.info("=== PASS 1: Creating Articles, Authors and AUTHORED relations ===");
-        BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(2);
+        BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(batchSize);
 
         Thread producer = new Thread(() -> {
             try (BufferedReader br = openReader(jsonPath)) {
@@ -116,17 +116,13 @@ public class Example {
                     String articleId = obj.getString("id", null);
                     if (articleId == null || articleId.isEmpty()) continue;
 
-                    // Flat article row
-                    Map<String, Object> articleRow = new HashMap<>();
-                    articleRow.put("articleId", articleId);
-                    articleRow.put("title", obj.getString("title", ""));
-
-                    // Flat author rows with back-reference to article
-                    List<Map<String, Object>> authorRows = extractAuthors(articleId, obj.getJsonArray("authors"));
+                    String title = obj.getString("title", "");
+                    if (title.length() > 500) title = title.substring(0, 500);
 
                     Map<String, Object> row = new HashMap<>();
-                    row.put("article", articleRow);
-                    row.put("authors", authorRows);
+                    row.put("id",      articleId);
+                    row.put("title",   title);
+                    row.put("authors", extractAuthors(articleId, obj.getJsonArray("authors")));
                     batch.add(row);
 
                     if (++count % batchSize == 0)
@@ -169,37 +165,24 @@ public class Example {
 
     private static void flushBatchPass1(Session session, List<Map<String, Object>> batch) {
         if (batch.isEmpty()) return;
-
-        // Split into two flat lists to avoid deep nesting in Values.parameters() (OOM fix)
-        List<Map<String, Object>> articleRows = new ArrayList<>(batch.size());
-        List<Map<String, Object>> authorRows  = new ArrayList<>(batch.size() * 3);
-
-        for (Map<String, Object> row : batch) {
-            articleRows.add((Map<String, Object>) row.get("article"));
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> authors = (List<Map<String, Object>>) row.get("authors");
-            authorRows.addAll(authors);
-        }
-
         session.writeTransaction(tx -> {
-            // 1. Upsert articles
             tx.run(
                 "UNWIND $rows AS row " +
-                "MERGE (a:Article {_id: row.articleId}) " +
-                "SET a.title = row.title",
-                parameters("rows", articleRows));
-
-            // 2. Upsert authors and AUTHORED relations (flat list, no nesting)
-            if (!authorRows.isEmpty()) {
-                tx.run(
-                    "UNWIND $rows AS row " +
-                    "MERGE (au:Author {_id: row.authorId}) " +
-                    "ON CREATE SET au.name = row.name, au.org = row.org " +
-                    "WITH au, row " +
-                    "MATCH (a:Article {_id: row.articleId}) " +
-                    "MERGE (au)-[:AUTHORED]->(a)",
-                    parameters("rows", authorRows));
-            }
+                "MERGE (a:Article {_id: row.id}) " +
+                "ON CREATE SET a.title = row.title " +
+                "ON MATCH SET a.title = row.title " +
+                "WITH a, row " +
+                "CALL { " +
+                "  WITH a, row " +
+                "  UNWIND coalesce(row.authors, []) AS author " +
+                "  MERGE (au:Author {_id: author.id}) " +
+                "  ON CREATE SET au.name = author.name, au.org = author.org " +
+                "  WITH a, au " +
+                "  MERGE (au)-[:AUTHORED]->(a) " +
+                "  RETURN count(*) AS authorWrites " +
+                "} " +
+                "RETURN count(*) AS processed",
+                parameters("rows", batch));
             return null;
         });
     }
@@ -211,7 +194,7 @@ public class Example {
     private static void runPass2(Driver driver, String jsonPath, int nbArticles, int batchSize)
             throws InterruptedException {
         logger.info("=== PASS 2: Creating CITES relations ===");
-        BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(2);
+        BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(batchSize);
 
         Thread producer = new Thread(() -> {
             try (BufferedReader br = openReader(jsonPath)) {
@@ -337,9 +320,8 @@ public class Example {
     }
 
     /**
-     * Extracts flat author rows from a JSON array.
-     * Each row includes a back-reference to the article (articleId) to allow
-     * a flat UNWIND in Cypher without nested objects (OOM fix).
+     * Extracts author maps {id, name, org} from a JSON array.
+     * Returns an empty list if null.
      */
     private static List<Map<String, Object>> extractAuthors(String articleId, JsonArray authors) {
         List<Map<String, Object>> result = new ArrayList<>();
@@ -353,10 +335,9 @@ public class Example {
             if (id == null || id.isEmpty()) id = generateAuthorId(name, org);
 
             Map<String, Object> row = new HashMap<>();
-            row.put("authorId",  id);
-            row.put("articleId", articleId);
-            row.put("name",      name);
-            row.put("org",       org);
+            row.put("id",   id);
+            row.put("name", name);
+            row.put("org",  org);
             result.add(row);
         }
         return result;
