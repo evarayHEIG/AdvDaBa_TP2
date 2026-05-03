@@ -1,38 +1,20 @@
 package mse.advDB;
 
-import org.neo4j.driver.AuthTokens;
-import org.neo4j.driver.Driver;
-import org.neo4j.driver.GraphDatabase;
-import org.neo4j.driver.Result;
-import org.neo4j.driver.Session;
-
 import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
-import jakarta.json.JsonString;
 import jakarta.json.JsonValue;
-
-import java.io.BufferedReader;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.StringReader;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Set;
-import java.util.HashSet;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-
-import java.net.URL;
-
+import org.neo4j.driver.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.*;
+import java.net.URL;
+import java.time.Instant;
+import java.util.*;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 import static org.neo4j.driver.Values.parameters;
 
@@ -40,35 +22,60 @@ public class Example {
 
     private static final Logger logger = LoggerFactory.getLogger(Example.class);
 
-    // Sentinel object to signal end of stream
-    private static final List<Map<String, Object>> END_OF_STREAM = new ArrayList<>();
+    // Sentinel to signal end of producer stream
+    private static final List<Map<String, Object>> END_OF_STREAM = Collections.emptyList();
 
-    public static void main(String[] args) throws IOException, InterruptedException {
-        String jsonPath = System.getenv("JSON_FILE");
-        logger.info("Path to JSON file is {}", jsonPath);
-        int nbArticles = Integer.max(1000,Integer.parseInt(System.getenv().getOrDefault("MAX_NODES", "10000000")));
-        logger.info("Number of articles to consider is {}", nbArticles);
-        int batchSize = Integer.max(1, Integer.parseInt(System.getenv().getOrDefault("BATCH_SIZE", "10000")));
-        logger.info("Batch size is {}", batchSize);
-        String neo4jIP = System.getenv("NEO4J_IP");
-        logger.info("IP addresss of neo4j server is {}", neo4jIP);
+    // -------------------------------------------------------------------------
+    // Entry point
+    // -------------------------------------------------------------------------
 
-        Driver driver = GraphDatabase.driver("bolt://" + neo4jIP + ":7687", AuthTokens.basic("neo4j", "test"));
-	boolean connected = false;
-	do {
-	   try {
-	       logger.info("Sleeping a bit waiting for the db");	   
-	       Thread.yield();   
-               Thread.sleep(5000); // let some time for the neo4j container to be up and running
+    public static void main(String[] args) throws InterruptedException {
+        String jsonPath   = System.getenv("JSON_FILE");
+        int nbArticles    = Math.max(1000, Integer.parseInt(System.getenv().getOrDefault("MAX_NODES",  "10000000")));
+        int batchSize     = Math.max(1,    Integer.parseInt(System.getenv().getOrDefault("BATCH_SIZE", "10000")));
+        String neo4jIP    = System.getenv("NEO4J_IP");
 
+        logger.info("JSON file   : {}", jsonPath);
+        logger.info("Max articles: {}", nbArticles);
+        logger.info("Batch size  : {}", batchSize);
+        logger.info("Neo4j IP    : {}", neo4jIP);
+
+        Driver driver = GraphDatabase.driver(
+                "bolt://" + neo4jIP + ":7687",
+                AuthTokens.basic("neo4j", "test"));
+
+        waitForDatabase(driver);
+        createConstraints(driver);
+
+        Instant startTime = Instant.now();
+        logger.info("Loading started at: {}", startTime);
+
+        runPass1(driver, jsonPath, nbArticles, batchSize);
+        runPass2(driver, jsonPath, nbArticles, batchSize);
+
+        logFinalStats(driver, startTime);
+        driver.close();
+    }
+
+    // -------------------------------------------------------------------------
+    // Database setup
+    // -------------------------------------------------------------------------
+
+    private static void waitForDatabase(Driver driver) {
+        boolean connected = false;
+        while (!connected) {
+            try {
+                logger.info("Waiting for Neo4j to be ready...");
+                Thread.sleep(5000);
                 driver.verifyConnectivity();
-	        connected = true;
+                connected = true;
+            } catch (Exception ignored) {
             }
-	    catch(Exception e) {
-  	    }
-	} while(!connected);
+        }
+        logger.info("Neo4j is ready.");
+    }
 
-    // Create constraints (unique index on _id)
+    private static void createConstraints(Driver driver) {
         try (Session session = driver.session()) {
             session.writeTransaction(tx -> {
                 tx.run("CREATE CONSTRAINT constraint_article IF NOT EXISTS " +
@@ -79,336 +86,278 @@ public class Example {
             });
             logger.info("Constraints created.");
         }
-
-        // Open JSON stream (the file can be a URL http:// or a local path)
-        InputStream inputStream;
-        if (jsonPath.startsWith("http://") || jsonPath.startsWith("https://")) {
-            inputStream = new URL(jsonPath).openStream();
-        } else {
-            inputStream = new FileInputStream(jsonPath);
-        }
-
-        Instant startTime = Instant.now();
-        logger.info("Loading started at instant: {}", startTime);
-
-        // PASS 1: Create Articles and Authors with producer-consumer pattern
-        logger.info("=== PASS 1: Creating Articles and Authors ===");
-        BlockingQueue<List<Map<String, Object>>> queue1 = new LinkedBlockingQueue<>(batchSize);
-        
-        // Producer thread: reads from stream and puts batches in queue
-        Thread producer1 = new Thread(() -> {
-            try {
-                InputStream inputStream1;
-                if (jsonPath.startsWith("http://") || jsonPath.startsWith("https://")) {
-                    inputStream1 = new URL(jsonPath).openStream();
-                } else {
-                    inputStream1 = new FileInputStream(jsonPath);
-                }
-                
-                try (BufferedReader br = new BufferedReader(new InputStreamReader(inputStream1))) {
-                    String line;
-                    int articleCount = 0;
-                    List<Map<String, Object>> batch = new ArrayList<>(batchSize);
-                    
-                    while ((line = br.readLine()) != null && articleCount < nbArticles) {
-                        JsonObject obj;
-                        try (JsonReader reader = Json.createReader(new StringReader(line))) {
-                            obj = reader.readObject();
-                        } catch (Exception e) {
-                            logger.warn("Skipping malformed line: {}", e.getMessage());
-                            continue;
-                        }
-
-                        String articleId = obj.getString("id", null);
-                        String title = obj.getString("title", "");
-                        if (articleId == null || articleId.isEmpty()) continue;
-
-                        Map<String, Object> row = new HashMap<>();
-                        row.put("id", articleId);
-                        row.put("title", title);
-
-                        // Prepare authors
-                        List<Map<String, Object>> authorRows = new ArrayList<>();
-                        JsonArray authors = obj.getJsonArray("authors");
-                        if (authors != null) {
-                            for (JsonValue av : authors) {
-                                JsonObject author = (JsonObject) av;
-                                String authorId = author.getString("id", null);
-                                String authorName = author.getString("name", "");
-                                String authorOrg = author.getString("org", "");
-                                if (authorId == null || authorId.isEmpty()) {
-                                    authorId = generateAuthorId(authorName, authorOrg);
-                                }
-                                Map<String, Object> authorRow = new HashMap<>();
-                                authorRow.put("id", authorId);
-                                authorRow.put("name", authorName);
-                                authorRow.put("org", authorOrg != null ? authorOrg : "");
-                                authorRows.add(authorRow);
-                            }
-                        }
-                        row.put("authors", authorRows);
-                        batch.add(row);
-
-                        articleCount++;
-                        if (articleCount % batchSize == 0) {
-                            logger.info("[PASS 1 Producer] Read {} articles", articleCount);
-                        }
-
-                        if (batch.size() >= batchSize) {
-                            queue1.put(new ArrayList<>(batch));
-                            batch.clear();
-                        }
-                    }
-                    
-                    // Put remaining batch
-                    if (!batch.isEmpty()) {
-                        queue1.put(batch);
-                    }
-                    
-                    // Signal end of stream
-                    queue1.put(END_OF_STREAM);
-                    logger.info("[PASS 1 Producer] Finished reading, sent {} articles", articleCount);
-                }
-            } catch (Exception e) {
-                logger.error("Error in PASS 1 Producer: {}", e.getMessage());
-                e.printStackTrace();
-            }
-        });
-
-        // Consumer thread: takes batches from queue and commits to DB
-        Thread consumer1 = new Thread(() -> {
-            try (Session session = driver.session()) {
-                int batchCount = 0;
-                int totalArticlesCommitted = 0;
-                while (true) {
-                    List<Map<String, Object>> batch = queue1.take();
-                    if (batch == END_OF_STREAM) {
-                        logger.info("[PASS 1 Consumer] Received end signal, finishing");
-                        break;
-                    }
-                    logger.debug("[PASS 1 Consumer] Committing batch of {} articles", batch.size());
-                    flushBatchPass1(session, batch);
-                    batchCount++;
-                    totalArticlesCommitted += batch.size();
-                    if (batchCount % 1 == 0) {
-                        logger.info("[PASS 1 Consumer] Committed {} batches ({} articles)", batchCount, totalArticlesCommitted);
-                    }
-                }
-            } catch (Exception e) {
-                logger.error("Error in PASS 1 Consumer: {}", e.getMessage());
-                e.printStackTrace();
-            }
-        });
-
-        producer1.start();
-        consumer1.start();
-        producer1.join();
-        consumer1.join();
-        logger.info("PASS 1 Complete");
-
-        // PASS 2: Create Reference Relations with producer-consumer pattern
-        logger.info("=== PASS 2: Creating Reference Relations (CITES) ===");
-        BlockingQueue<List<Map<String, Object>>> queue2 = new LinkedBlockingQueue<>(batchSize);
-        
-        // Producer thread: reads from stream and puts batches in queue
-        Thread producer2 = new Thread(() -> {
-            try {
-                InputStream inputStream2;
-                if (jsonPath.startsWith("http://") || jsonPath.startsWith("https://")) {
-                    inputStream2 = new URL(jsonPath).openStream();
-                } else {
-                    inputStream2 = new FileInputStream(jsonPath);
-                }
-                
-                try (BufferedReader br = new BufferedReader(new InputStreamReader(inputStream2))) {
-                    String line;
-                    int articleCount = 0;
-                    List<Map<String, Object>> batch = new ArrayList<>(batchSize);
-                    
-                    while ((line = br.readLine()) != null && articleCount < nbArticles) {
-                        JsonObject obj;
-                        try (JsonReader reader = Json.createReader(new StringReader(line))) {
-                            obj = reader.readObject();
-                        } catch (Exception e) {
-                            logger.warn("Skipping malformed line: {}", e.getMessage());
-                            continue;
-                        }
-
-                        String articleId = obj.getString("id", null);
-                        if (articleId == null || articleId.isEmpty()) continue;
-
-                        Map<String, Object> row = new HashMap<>();
-                        row.put("id", articleId);
-
-                        // Prepare references
-                        Set<String> refs = new HashSet<>();
-                        JsonArray references = obj.getJsonArray("references");
-                        if (references != null) {
-                            for (JsonValue rv : references) {
-                                String refId = ((JsonString) rv).getString();
-                                if (refId != null && !refId.isEmpty()) {
-                                    refs.add(refId);
-                                }
-                            }
-                        }
-                        row.put("references", new ArrayList<>(refs));
-                        batch.add(row);
-
-                        articleCount++;
-                        if (articleCount % batchSize == 0) {
-                            logger.info("[PASS 2 Producer] Read {} articles", articleCount);
-                        }
-
-                        if (batch.size() >= batchSize) {
-                            queue2.put(new ArrayList<>(batch));
-                            batch.clear();
-                        }
-                    }
-                    
-                    // Put remaining batch
-                    if (!batch.isEmpty()) {
-                        queue2.put(batch);
-                    }
-                    
-                    // Signal end of stream
-                    queue2.put(END_OF_STREAM);
-                    logger.info("[PASS 1 Producer] Finished reading, sent {} articles", articleCount);
-                }
-            } catch (Exception e) {
-                logger.error("Error in PASS 1 Producer: {}", e.getMessage());
-                e.printStackTrace();
-            }
-        });
-
-        // Consumer thread: takes batches from queue and commits to DB
-        Thread consumer2 = new Thread(() -> {
-            try (Session session = driver.session()) {
-                int batchCount = 0;
-                int totalReferencesCommitted = 0;
-                while (true) {
-                    List<Map<String, Object>> batch = queue2.take();
-                    if (batch == END_OF_STREAM) {
-                        logger.info("[PASS 2 Consumer] Received end signal, finishing");
-                        break;
-                    }
-                    logger.debug("[PASS 2 Consumer] Committing batch of {} references", batch.size());
-                    flushBatchPass2(session, batch);
-                    batchCount++;
-                    totalReferencesCommitted += batch.size();
-                    if (batchCount % 1 == 0) {
-                        logger.info("[PASS 2 Consumer] Committed {} batches ({} references)", batchCount, totalReferencesCommitted);
-                    }
-                }
-            } catch (Exception e) {
-                logger.error("Error in PASS 2 Producer: {}", e.getMessage());
-                e.printStackTrace();
-            }
-        });
-
-        producer2.start();
-        consumer2.start();
-        producer2.join();
-        consumer2.join();
-        logger.info("PASS 2 Complete");
-
-        // Final stats
-        Instant endTime = Instant.now();
-
-        // Count total articles and authors loaded
-        try (Session session = driver.session()) {
-            long totalArticles = session.readTransaction(tx -> {
-                Result r = tx.run("MATCH (a:Article) RETURN count(a) AS c");
-                return r.single().get("c").asLong();
-            });
-            long totalAuthors = session.readTransaction(tx -> {
-                Result r = tx.run("MATCH (a:Author) RETURN count(a) AS c");
-                return r.single().get("c").asLong();
-            });
-            long totalRelations = session.readTransaction(tx -> {
-                Result r = tx.run("MATCH ()-[:CITES]->() RETURN count(*) AS c");
-                return r.single().get("c").asLong();
-            });
-            long totalNodes = totalArticles + totalAuthors;
-
-            logger.info("=== Loading complete ===");
-            logger.info("Started at           : {}", startTime);
-            logger.info("Ended at             : {}", endTime);
-            logger.info("Duration            : {} seconds", (endTime.getEpochSecond() - startTime.getEpochSecond()));
-            logger.info("Articles loaded     : {}", totalArticles);
-            logger.info("Authors loaded      : {}", totalAuthors);
-            logger.info("Total nodes         : {}", totalNodes);
-            logger.info("Citation relations  : {}", totalRelations);
-        }
-
-    driver.close();
     }
 
-    /**
-     * PASS 1: Create Articles and Authors with AUTHORED relations
-     * Optimized with ON CREATE to avoid unnecessary writes
-     */
-    private static void flushBatchPass1(Session session, List<Map<String, Object>> batchRows) {
-        if (batchRows.isEmpty()) {
-            return;
-        }
+    // -------------------------------------------------------------------------
+    // Pass 1 – Articles, Authors, AUTHORED relations
+    // -------------------------------------------------------------------------
 
+    private static void runPass1(Driver driver, String jsonPath, int nbArticles, int batchSize)
+            throws InterruptedException {
+        logger.info("=== PASS 1: Creating Articles, Authors and AUTHORED relations ===");
+        BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(batchSize);
+
+        Thread producer = new Thread(() -> {
+            try (BufferedReader br = openReader(jsonPath)) {
+                String line;
+                int count = 0;
+                List<Map<String, Object>> batch = new ArrayList<>(batchSize);
+
+                while ((line = br.readLine()) != null && count < nbArticles) {
+                    JsonObject obj = parseLine(line);
+                    if (obj == null) continue;
+
+                    String articleId = obj.getString("id", null);
+                    if (articleId == null || articleId.isEmpty()) continue;
+
+                    Map<String, Object> row = new HashMap<>();
+                    row.put("id", articleId);
+                    row.put("title", obj.getString("title", ""));
+                    row.put("authors", extractAuthors(obj.getJsonArray("authors")));
+                    batch.add(row);
+
+                    if (++count % batchSize == 0)
+                        logger.info("[PASS 1 Producer] Read {} articles", count);
+
+                    if (batch.size() >= batchSize) {
+                        queue.put(new ArrayList<>(batch));
+                        batch.clear();
+                    }
+                }
+
+                if (!batch.isEmpty()) queue.put(batch);
+                queue.put(END_OF_STREAM);
+                logger.info("[PASS 1 Producer] Done – {} articles read", count);
+
+            } catch (Exception e) {
+                logger.error("[PASS 1 Producer] Error: {}", e.getMessage(), e);
+            }
+        });
+
+        Thread consumer = new Thread(() -> {
+            try (Session session = driver.session()) {
+                int batches = 0, total = 0;
+                while (true) {
+                    List<Map<String, Object>> batch = queue.take();
+                    if (batch == END_OF_STREAM) break;
+                    flushBatchPass1(session, batch);
+                    total += batch.size();
+                    logger.info("[PASS 1 Consumer] Committed batch {} ({} articles total)", ++batches, total);
+                }
+                logger.info("[PASS 1 Consumer] Finished – {} articles committed", total);
+            } catch (Exception e) {
+                logger.error("[PASS 1 Consumer] Error: {}", e.getMessage(), e);
+            }
+        });
+
+        runAndJoin(producer, consumer);
+        logger.info("PASS 1 complete.");
+    }
+
+    private static void flushBatchPass1(Session session, List<Map<String, Object>> batch) {
+        if (batch.isEmpty()) return;
         session.writeTransaction(tx -> {
-            String query = new StringBuilder()
-                .append("UNWIND $rows AS row ")
-                .append("MERGE (a:Article {_id: row.id}) ")
-                .append("ON CREATE SET a.title = row.title ")
-                .append("ON MATCH SET a.title = row.title ")
-                .append("WITH a, row ")
-                .append("CALL { ")
-                .append("  WITH a, row ")
-                .append("  UNWIND coalesce(row.authors, []) AS author ")
-                .append("  MERGE (au:Author {_id: author.id}) ")
-                .append("  ON CREATE SET au.name = author.name, au.org = author.org ")
-                .append("  WITH a, au ")
-                .append("  MERGE (au)-[:AUTHORED]->(a) ")
-                .append("  RETURN count(*) AS authorWrites ")
-                .append("} ")
-                .append("RETURN count(*) AS processed")
-                .toString();
-
             tx.run(
-                query,
-                parameters("rows", batchRows)
-            );
+                "UNWIND $rows AS row " +
+                "MERGE (a:Article {_id: row.id}) " +
+                "SET a.title = row.title " +
+                "WITH a, row " +
+                "CALL { " +
+                "  WITH a, row " +
+                "  UNWIND coalesce(row.authors, []) AS author " +
+                "  MERGE (au:Author {_id: author.id}) " +
+                "  ON CREATE SET au.name = author.name, au.org = author.org " +
+                "  MERGE (au)-[:AUTHORED]->(a) " +
+                "  RETURN count(*) AS dummy " +
+                "} " +
+                "RETURN count(*) AS processed",
+                parameters("rows", batch));
             return null;
         });
     }
 
-    /**
-     * PASS 2: Create reference relations (CITES) only if target article exists
-     */
-    private static void flushBatchPass2(Session session, List<Map<String, Object>> batchRows) {
-        if (batchRows.isEmpty()) {
-            return;
-        }
+    // -------------------------------------------------------------------------
+    // Pass 2 – CITES relations
+    // -------------------------------------------------------------------------
 
+    private static void runPass2(Driver driver, String jsonPath, int nbArticles, int batchSize)
+            throws InterruptedException {
+        logger.info("=== PASS 2: Creating CITES relations ===");
+        BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(batchSize);
+
+        Thread producer = new Thread(() -> {
+            try (BufferedReader br = openReader(jsonPath)) {
+                String line;
+                int count = 0;
+                List<Map<String, Object>> batch = new ArrayList<>(batchSize);
+
+                while ((line = br.readLine()) != null && count < nbArticles) {
+                    JsonObject obj = parseLine(line);
+                    if (obj == null) continue;
+
+                    String articleId = obj.getString("id", null);
+                    if (articleId == null || articleId.isEmpty()) continue;
+
+                    Map<String, Object> row = new HashMap<>();
+                    row.put("id", articleId);
+                    row.put("references", extractReferences(obj.getJsonArray("references")));
+                    batch.add(row);
+
+                    if (++count % batchSize == 0)
+                        logger.info("[PASS 2 Producer] Read {} articles", count);
+
+                    if (batch.size() >= batchSize) {
+                        queue.put(new ArrayList<>(batch));
+                        batch.clear();
+                    }
+                }
+
+                if (!batch.isEmpty()) queue.put(batch);
+                queue.put(END_OF_STREAM);
+                logger.info("[PASS 2 Producer] Done – {} articles read", count);
+
+            } catch (Exception e) {
+                logger.error("[PASS 2 Producer] Error: {}", e.getMessage(), e);
+            }
+        });
+
+        Thread consumer = new Thread(() -> {
+            try (Session session = driver.session()) {
+                int batches = 0, total = 0;
+                while (true) {
+                    List<Map<String, Object>> batch = queue.take();
+                    if (batch == END_OF_STREAM) break;
+                    flushBatchPass2(session, batch);
+                    total += batch.size();
+                    logger.info("[PASS 2 Consumer] Committed batch {} ({} articles total)", ++batches, total);
+                }
+                logger.info("[PASS 2 Consumer] Finished – {} articles processed", total);
+            } catch (Exception e) {
+                logger.error("[PASS 2 Consumer] Error: {}", e.getMessage(), e);
+            }
+        });
+
+        runAndJoin(producer, consumer);
+        logger.info("PASS 2 complete.");
+    }
+
+    private static void flushBatchPass2(Session session, List<Map<String, Object>> batch) {
+        if (batch.isEmpty()) return;
         session.writeTransaction(tx -> {
-            String query =
+            tx.run(
                 "UNWIND $rows AS row " +
                 "MATCH (a:Article {_id: row.id}) " +
                 "UNWIND row.references AS refId " +
                 "MATCH (t:Article {_id: refId}) " +
-                "CREATE (a)-[:CITES]->(t)";
-
-            tx.run(
-                query,
-                parameters("rows", batchRows)
-            );
+                "CREATE (a)-[:CITES]->(t)",
+                parameters("rows", batch));
             return null;
         });
     }
 
-    /**
-     * Generate an author ID if missing. Format: AUTHOR_<hash of name+org>
-     */
+    // -------------------------------------------------------------------------
+    // Stats
+    // -------------------------------------------------------------------------
+
+    private static void logFinalStats(Driver driver, Instant startTime) {
+        Instant endTime = Instant.now();
+        try (Session session = driver.session()) {
+            long articles  = countNodes(session, "Article");
+            long authors   = countNodes(session, "Author");
+            long citations = session.readTransaction(tx ->
+                    tx.run("MATCH ()-[:CITES]->() RETURN count(*) AS c")
+                      .single().get("c").asLong());
+
+            logger.info("=== Loading complete ===");
+            logger.info("Started at        : {}", startTime);
+            logger.info("Ended at          : {}", endTime);
+            logger.info("Duration          : {} s", endTime.getEpochSecond() - startTime.getEpochSecond());
+            logger.info("Articles loaded   : {}", articles);
+            logger.info("Authors loaded    : {}", authors);
+            logger.info("Total nodes       : {}", articles + authors);
+            logger.info("Citation relations: {}", citations);
+        }
+    }
+
+    private static long countNodes(Session session, String label) {
+        return session.readTransaction(tx ->
+                tx.run("MATCH (n:" + label + ") RETURN count(n) AS c")
+                  .single().get("c").asLong());
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /** Opens a BufferedReader from a local path or HTTP(S) URL. */
+    private static BufferedReader openReader(String path) throws IOException {
+            InputStream is = (path.startsWith("http://") || path.startsWith("https://"))
+                    ? new URL(path).openStream()
+                    : new FileInputStream(path);
+            return new BufferedReader(new InputStreamReader(is));
+        }
+
+        /** Parses a JSON line; returns null and logs a warning on failure. */
+        private static JsonObject parseLine(String line) {
+        if (line == null || line.isBlank()) {
+            return null;
+        }
+
+        try (StringReader sr = new StringReader(line);
+            JsonReader reader = Json.createReader(sr)) {
+
+            return reader.readObject();
+
+        } catch (Exception e) {
+            logger.warn("Skipping malformed JSON line: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** Extracts author maps from a JSON array; returns an empty list if null. */
+    private static List<Map<String, Object>> extractAuthors(JsonArray authors) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        if (authors == null) return result;
+
+        for (JsonValue av : authors) {
+            JsonObject a = (JsonObject) av;
+            String id   = a.getString("id", null);
+            String name = a.getString("name", "");
+            String org  = a.getString("org", "");
+            if (id == null || id.isEmpty()) id = generateAuthorId(name, org);
+
+            Map<String, Object> row = new HashMap<>();
+            row.put("id",   id);
+            row.put("name", name);
+            row.put("org",  org);
+            result.add(row);
+        }
+        return result;
+    }
+
+    /** Extracts reference IDs from a JSON array; returns an empty list if null. */
+    private static List<String> extractReferences(JsonArray references) {
+        Set<String> refs = new HashSet<>();
+        if (references != null) {
+            for (JsonValue rv : references) {
+                String refId = rv.toString().replaceAll("^\"|\"$", "");
+                if (!refId.isEmpty()) refs.add(refId);
+            }
+        }
+        return new ArrayList<>(refs);
+    }
+
+    /** Generates a deterministic author ID when none is provided. */
     private static String generateAuthorId(String name, String org) {
         String key = (name != null ? name : "") + "_" + (org != null ? org : "");
-        int hash = Math.abs(key.hashCode());
-        return "AUTHOR_" + hash;
+        return "AUTHOR_" + Math.abs(key.hashCode());
+    }
+
+    /** Starts producer and consumer threads and waits for both to finish. */
+    private static void runAndJoin(Thread producer, Thread consumer) throws InterruptedException {
+        producer.start();
+        consumer.start();
+        producer.join();
+        consumer.join();
     }
 }
