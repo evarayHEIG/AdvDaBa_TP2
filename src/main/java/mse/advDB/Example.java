@@ -386,19 +386,12 @@ public class Example {
         }
 
         session.writeTransaction(tx -> {
-            String query = new StringBuilder()
-                .append("UNWIND $rows AS row ")
-                .append("MATCH (a:Article {_id: row.id}) ")
-                .append("WITH a, row ")
-                .append("CALL { ")
-                .append("  WITH a, row ")
-                .append("  UNWIND coalesce(row.references, []) AS refId ")
-                .append("  MATCH (target:Article {_id: refId}) ")
-                .append("  MERGE (a)-[:CITES]->(target) ")
-                .append("  RETURN count(*) AS refWrites ")
-                .append("} ")
-                .append("RETURN count(*) AS processed")
-                .toString();
+            String query =
+                "UNWIND $rows AS row " +
+                "MATCH (a:Article {_id: row.id}) " +
+                "UNWIND row.references AS refId " +
+                "MATCH (t:Article {_id: refId}) " +
+                "MERGE (a)-[:CITES]->(t)";
 
             tx.run(
                 query,
