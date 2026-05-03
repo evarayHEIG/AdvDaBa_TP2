@@ -197,25 +197,41 @@ public class Example {
         BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(4);
 
         Thread producer = new Thread(() -> {
+        int maxRetries = 5;
+        int attempt = 0;
+        int[] articlesRead = {0};
+
+        while (attempt < maxRetries) {
             try (BufferedReader br = openReader(jsonPath)) {
                 String line;
-                int count = 0;
+                // Skip les lignes déjà lues
+                int skipped = 0;
+                while (skipped < articlesRead[0] && (line = br.readLine()) != null) {
+                    skipped++;
+                }
+                if (attempt > 0)
+                    logger.info("[PASS 1 Producer] Resuming from article {}", articlesRead[0]);
+
                 List<Map<String, Object>> batch = new ArrayList<>(batchSize);
 
-                while ((line = br.readLine()) != null && count < nbArticles) {
+                while ((line = br.readLine()) != null && articlesRead[0] < nbArticles) {
                     JsonObject obj = parseLine(line);
                     if (obj == null) continue;
 
                     String articleId = obj.getString("id", null);
                     if (articleId == null || articleId.isEmpty()) continue;
 
+                    String title = obj.getString("title", "");
+                    if (title.length() > 500) title = title.substring(0, 500);
+
                     Map<String, Object> row = new HashMap<>();
-                    row.put("id", articleId);
-                    row.put("references", extractReferences(obj.getJsonArray("references")));
+                    row.put("id",      articleId);
+                    row.put("title",   title);
+                    row.put("authors", extractAuthors(articleId, obj.getJsonArray("authors")));
                     batch.add(row);
 
-                    if (++count % batchSize == 0)
-                        logger.info("[PASS 2 Producer] Read {} articles", count);
+                    if (++articlesRead[0] % batchSize == 0)
+                        logger.info("[PASS 1 Producer] Read {} articles", articlesRead[0]);
 
                     if (batch.size() >= batchSize) {
                         queue.put(new ArrayList<>(batch));
@@ -225,12 +241,25 @@ public class Example {
 
                 if (!batch.isEmpty()) queue.put(batch);
                 queue.put(END_OF_STREAM);
-                logger.info("[PASS 2 Producer] Done – {} articles read", count);
+                logger.info("[PASS 1 Producer] Done – {} articles read", articlesRead[0]);
+                return;
 
+            } catch (IOException e) {
+                attempt++;
+                logger.warn("[PASS 1 Producer] IO error (attempt {}/{}): {}", attempt, maxRetries, e.getMessage());
+                if (attempt >= maxRetries) {
+                    logger.error("[PASS 1 Producer] Max retries reached, aborting");
+                    try { queue.put(END_OF_STREAM); } catch (InterruptedException ignored) {}
+                } else {
+                    try { Thread.sleep(3000L * attempt); } catch (InterruptedException ignored) {}
+                }
             } catch (Exception e) {
-                logger.error("[PASS 2 Producer] Error: {}", e.getMessage(), e);
+                logger.error("[PASS 1 Producer] Fatal error: {}", e.getMessage(), e);
+                try { queue.put(END_OF_STREAM); } catch (InterruptedException ignored) {}
+                return;
             }
-        });
+        }
+    });
 
         Thread consumer = new Thread(() -> {
             try (Session session = driver.session()) {
