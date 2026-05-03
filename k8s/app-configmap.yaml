@@ -8,3 +8,4 @@ data:
   BATCH_SIZE: "15000"
   NEO4J_IP: "neo4j"
   NEO4J_PORT: "7687"
+  JAVA_TOOL_OPTIONS: "-Xmx2500m -Xms512m -XX:+UseG1GC"

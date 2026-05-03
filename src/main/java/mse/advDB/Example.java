@@ -108,6 +108,9 @@ public class Example {
                 String line;
                 int count = 0;
                 List<Map<String, Object>> batch = new ArrayList<>(batchSize);
+                // Track already-seen author IDs to use CREATE instead of MERGE
+                Set<String> seenAuthors  = new HashSet<>();
+                Set<String> seenArticles = new HashSet<>();
 
                 while ((line = br.readLine()) != null && count < nbArticles) {
                     JsonObject obj = parseLine(line);
@@ -115,14 +118,27 @@ public class Example {
 
                     String articleId = obj.getString("id", null);
                     if (articleId == null || articleId.isEmpty()) continue;
+                    if (!seenArticles.add(articleId)) {
+                        logger.debug("Skipping duplicate article {}", articleId);
+                        continue;
+                    }
 
                     String title = obj.getString("title", "");
                     if (title.length() > 500) title = title.substring(0, 500);
 
+                    List<Map<String, Object>> allAuthors  = extractAuthors(articleId, obj.getJsonArray("authors"));
+                    List<Map<String, Object>> newAuthors  = new ArrayList<>();
+                    for (Map<String, Object> author : allAuthors) {
+                        if (seenAuthors.add((String) author.get("id"))) {
+                            newAuthors.add(author);
+                        }
+                    }
+
                     Map<String, Object> row = new HashMap<>();
-                    row.put("id",      articleId);
-                    row.put("title",   title);
-                    row.put("authors", extractAuthors(articleId, obj.getJsonArray("authors")));
+                    row.put("id",         articleId);
+                    row.put("title",      title);
+                    row.put("newAuthors", newAuthors);   // CREATE – only first occurrence
+                    row.put("allAuthors", allAuthors);   // MATCH  – for AUTHORED relations
                     batch.add(row);
 
                     if (++count % batchSize == 0)
@@ -136,10 +152,12 @@ public class Example {
 
                 if (!batch.isEmpty()) queue.put(batch);
                 queue.put(END_OF_STREAM);
-                logger.info("[PASS 1 Producer] Done – {} articles read", count);
+                logger.info("[PASS 1 Producer] Done – {} articles read, {} unique authors seen",
+                        count, seenAuthors.size());
 
             } catch (Exception e) {
                 logger.error("[PASS 1 Producer] Error: {}", e.getMessage(), e);
+                try { queue.put(END_OF_STREAM); } catch (InterruptedException ignored) {}
             }
         });
 
@@ -165,26 +183,45 @@ public class Example {
 
     private static void flushBatchPass1(Session session, List<Map<String, Object>> batch) {
         if (batch.isEmpty()) return;
-        session.writeTransaction(tx -> {
-            tx.run(
-                "UNWIND $rows AS row " +
-                "MERGE (a:Article {_id: row.id}) " +
-                "ON CREATE SET a.title = row.title " +
-                "ON MATCH SET a.title = row.title " +
-                "WITH a, row " +
-                "CALL { " +
-                "  WITH a, row " +
-                "  UNWIND coalesce(row.authors, []) AS author " +
-                "  MERGE (au:Author {_id: author.id}) " +
-                "  ON CREATE SET au.name = author.name, au.org = author.org " +
-                "  WITH a, au " +
-                "  MERGE (au)-[:AUTHORED]->(a) " +
-                "  RETURN count(*) AS authorWrites " +
-                "} " +
-                "RETURN count(*) AS processed",
-                parameters("rows", batch));
-            return null;
-        });
+
+        List<Map<String, Object>> articleRows   = new ArrayList<>(batch.size());
+        List<Map<String, Object>> newAuthorRows = new ArrayList<>(batch.size() * 2);
+        List<Map<String, Object>> authoredRows  = new ArrayList<>(batch.size() * 3);
+
+        for (Map<String, Object> row : batch) {
+            articleRows.add(Map.of("id", row.get("id"), "title", row.get("title")));
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> newAuthors = (List<Map<String, Object>>) row.get("newAuthors");
+            newAuthorRows.addAll(newAuthors);
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> allAuthors = (List<Map<String, Object>>) row.get("allAuthors");
+            for (Map<String, Object> author : allAuthors) {
+                authoredRows.add(Map.of("articleId", row.get("id"), "authorId", author.get("id")));
+            }
+        }
+
+        try (Transaction tx = session.beginTransaction()) {
+            tx.run("UNWIND $rows AS row CREATE (a:Article {_id: row.id, title: row.title})",
+                parameters("rows", articleRows));
+
+            if (!newAuthorRows.isEmpty()) {
+                tx.run("UNWIND $rows AS row CREATE (au:Author {_id: row.id, name: row.name, org: row.org})",
+                    parameters("rows", newAuthorRows));
+            }
+
+            if (!authoredRows.isEmpty()) {
+                tx.run(new StringBuilder()
+                    .append("UNWIND $rows AS row ")
+                    .append("MATCH (a:Article {_id: row.articleId}) ")
+                    .append("MATCH (au:Author {_id: row.authorId}) ")
+                    .append("CREATE (au)-[:AUTHORED]->(a)")
+                    .toString(),
+                    parameters("rows", authoredRows));
+            }
+            tx.commit();
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -197,41 +234,25 @@ public class Example {
         BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(4);
 
         Thread producer = new Thread(() -> {
-        int maxRetries = 5;
-        int attempt = 0;
-        int[] articlesRead = {0};
-
-        while (attempt < maxRetries) {
             try (BufferedReader br = openReader(jsonPath)) {
                 String line;
-                // Skip les lignes déjà lues
-                int skipped = 0;
-                while (skipped < articlesRead[0] && (line = br.readLine()) != null) {
-                    skipped++;
-                }
-                if (attempt > 0)
-                    logger.info("[PASS 1 Producer] Resuming from article {}", articlesRead[0]);
-
+                int count = 0;
                 List<Map<String, Object>> batch = new ArrayList<>(batchSize);
 
-                while ((line = br.readLine()) != null && articlesRead[0] < nbArticles) {
+                while ((line = br.readLine()) != null && count < nbArticles) {
                     JsonObject obj = parseLine(line);
                     if (obj == null) continue;
 
                     String articleId = obj.getString("id", null);
                     if (articleId == null || articleId.isEmpty()) continue;
 
-                    String title = obj.getString("title", "");
-                    if (title.length() > 500) title = title.substring(0, 500);
-
                     Map<String, Object> row = new HashMap<>();
-                    row.put("id",      articleId);
-                    row.put("title",   title);
-                    row.put("authors", extractAuthors(articleId, obj.getJsonArray("authors")));
+                    row.put("id", articleId);
+                    row.put("references", extractReferences(obj.getJsonArray("references")));
                     batch.add(row);
 
-                    if (++articlesRead[0] % batchSize == 0)
-                        logger.info("[PASS 1 Producer] Read {} articles", articlesRead[0]);
+                    if (++count % batchSize == 0)
+                        logger.info("[PASS 2 Producer] Read {} articles", count);
 
                     if (batch.size() >= batchSize) {
                         queue.put(new ArrayList<>(batch));
@@ -241,25 +262,13 @@ public class Example {
 
                 if (!batch.isEmpty()) queue.put(batch);
                 queue.put(END_OF_STREAM);
-                logger.info("[PASS 1 Producer] Done – {} articles read", articlesRead[0]);
-                return;
+                logger.info("[PASS 2 Producer] Done – {} articles read", count);
 
-            } catch (IOException e) {
-                attempt++;
-                logger.warn("[PASS 1 Producer] IO error (attempt {}/{}): {}", attempt, maxRetries, e.getMessage());
-                if (attempt >= maxRetries) {
-                    logger.error("[PASS 1 Producer] Max retries reached, aborting");
-                    try { queue.put(END_OF_STREAM); } catch (InterruptedException ignored) {}
-                } else {
-                    try { Thread.sleep(3000L * attempt); } catch (InterruptedException ignored) {}
-                }
             } catch (Exception e) {
-                logger.error("[PASS 1 Producer] Fatal error: {}", e.getMessage(), e);
+                logger.error("[PASS 2 Producer] Error: {}", e.getMessage(), e);
                 try { queue.put(END_OF_STREAM); } catch (InterruptedException ignored) {}
-                return;
             }
-        }
-    });
+        });
 
         Thread consumer = new Thread(() -> {
             try (Session session = driver.session()) {
@@ -283,16 +292,17 @@ public class Example {
 
     private static void flushBatchPass2(Session session, List<Map<String, Object>> batch) {
         if (batch.isEmpty()) return;
-        session.writeTransaction(tx -> {
-            tx.run(
-                "UNWIND $rows AS row " +
-                "MATCH (a:Article {_id: row.id}) " +
-                "UNWIND row.references AS refId " +
-                "MATCH (t:Article {_id: refId}) " +
-                "CREATE (a)-[:CITES]->(t)",
+        try (Transaction tx = session.beginTransaction()) {
+            tx.run(new StringBuilder()
+                .append("UNWIND $rows AS row ")
+                .append("MATCH (a:Article {_id: row.id}) ")
+                .append("UNWIND row.references AS refId ")
+                .append("MATCH (t:Article {_id: refId}) ")
+                .append("CREATE (a)-[:CITES]->(t)")
+                .toString(),
                 parameters("rows", batch));
-            return null;
-        });
+            tx.commit();
+        }
     }
 
     // -------------------------------------------------------------------------

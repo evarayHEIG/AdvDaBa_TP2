@@ -15,7 +15,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: app
-        image: ghcr.io/evarayheig/advdaba-tp2:3b7920a518cf3eced3359c0b49d06e3fdc41adb2
+        image: ghcr.io/evarayheig/advdaba-tp2:latest
         imagePullPolicy: Always
         envFrom:
         - configMapRef:

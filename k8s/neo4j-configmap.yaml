@@ -6,8 +6,8 @@ metadata:
 data:
   neo4j.conf: |
     dbms.directories.import=import
-    dbms.memory.heap.initial_size=256m
-    dbms.memory.heap.max_size=512m
+    dbms.memory.heap.initial_size=1g
+    dbms.memory.heap.max_size=2g
     dbms.tx_state.memory_allocation=ON_HEAP
     dbms.default_listen_address=0.0.0.0
     dbms.connector.bolt.enabled=true
