@@ -4,6 +4,8 @@ import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
+import jakarta.json.JsonReaderFactory;
+import jakarta.json.JsonString;
 import jakarta.json.JsonValue;
 import org.neo4j.driver.*;
 import org.slf4j.Logger;
@@ -11,6 +13,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
@@ -22,6 +25,9 @@ public class Example {
 
     private static final Logger logger = LoggerFactory.getLogger(Example.class);
 
+    // Shared factory – avoids reloading the ServiceLoader on every parsed line (OOM fix)
+    private static final JsonReaderFactory JSON_READER_FACTORY = Json.createReaderFactory(Collections.emptyMap());
+
     // Sentinel to signal end of producer stream
     private static final List<Map<String, Object>> END_OF_STREAM = Collections.emptyList();
 
@@ -30,10 +36,10 @@ public class Example {
     // -------------------------------------------------------------------------
 
     public static void main(String[] args) throws InterruptedException {
-        String jsonPath   = System.getenv("JSON_FILE");
-        int nbArticles    = Math.max(1000, Integer.parseInt(System.getenv().getOrDefault("MAX_NODES",  "10000000")));
-        int batchSize     = Math.max(1,    Integer.parseInt(System.getenv().getOrDefault("BATCH_SIZE", "10000")));
-        String neo4jIP    = System.getenv("NEO4J_IP");
+        String jsonPath = System.getenv("JSON_FILE");
+        int nbArticles  = Math.max(1000, Integer.parseInt(System.getenv().getOrDefault("MAX_NODES",  "10000000")));
+        int batchSize   = Math.max(1,    Integer.parseInt(System.getenv().getOrDefault("BATCH_SIZE", "10000")));
+        String neo4jIP  = System.getenv("NEO4J_IP");
 
         logger.info("JSON file   : {}", jsonPath);
         logger.info("Max articles: {}", nbArticles);
@@ -110,10 +116,17 @@ public class Example {
                     String articleId = obj.getString("id", null);
                     if (articleId == null || articleId.isEmpty()) continue;
 
+                    // Flat article row
+                    Map<String, Object> articleRow = new HashMap<>();
+                    articleRow.put("articleId", articleId);
+                    articleRow.put("title", obj.getString("title", ""));
+
+                    // Flat author rows with back-reference to article
+                    List<Map<String, Object>> authorRows = extractAuthors(articleId, obj.getJsonArray("authors"));
+
                     Map<String, Object> row = new HashMap<>();
-                    row.put("id", articleId);
-                    row.put("title", obj.getString("title", ""));
-                    row.put("authors", extractAuthors(obj.getJsonArray("authors")));
+                    row.put("article", articleRow);
+                    row.put("authors", authorRows);
                     batch.add(row);
 
                     if (++count % batchSize == 0)
@@ -156,22 +169,37 @@ public class Example {
 
     private static void flushBatchPass1(Session session, List<Map<String, Object>> batch) {
         if (batch.isEmpty()) return;
+
+        // Split into two flat lists to avoid deep nesting in Values.parameters() (OOM fix)
+        List<Map<String, Object>> articleRows = new ArrayList<>(batch.size());
+        List<Map<String, Object>> authorRows  = new ArrayList<>(batch.size() * 3);
+
+        for (Map<String, Object> row : batch) {
+            articleRows.add((Map<String, Object>) row.get("article"));
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> authors = (List<Map<String, Object>>) row.get("authors");
+            authorRows.addAll(authors);
+        }
+
         session.writeTransaction(tx -> {
+            // 1. Upsert articles
             tx.run(
                 "UNWIND $rows AS row " +
-                "MERGE (a:Article {_id: row.id}) " +
-                "SET a.title = row.title " +
-                "WITH a, row " +
-                "CALL { " +
-                "  WITH a, row " +
-                "  UNWIND coalesce(row.authors, []) AS author " +
-                "  MERGE (au:Author {_id: author.id}) " +
-                "  ON CREATE SET au.name = author.name, au.org = author.org " +
-                "  MERGE (au)-[:AUTHORED]->(a) " +
-                "  RETURN count(*) AS dummy " +
-                "} " +
-                "RETURN count(*) AS processed",
-                parameters("rows", batch));
+                "MERGE (a:Article {_id: row.articleId}) " +
+                "SET a.title = row.title",
+                parameters("rows", articleRows));
+
+            // 2. Upsert authors and AUTHORED relations (flat list, no nesting)
+            if (!authorRows.isEmpty()) {
+                tx.run(
+                    "UNWIND $rows AS row " +
+                    "MERGE (au:Author {_id: row.authorId}) " +
+                    "ON CREATE SET au.name = row.name, au.org = row.org " +
+                    "WITH au, row " +
+                    "MATCH (a:Article {_id: row.articleId}) " +
+                    "MERGE (au)-[:AUTHORED]->(a)",
+                    parameters("rows", authorRows));
+            }
             return null;
         });
     }
@@ -291,26 +319,29 @@ public class Example {
 
     /** Opens a BufferedReader from a local path or HTTP(S) URL. */
     private static BufferedReader openReader(String path) throws IOException {
-            InputStream is = (path.startsWith("http://") || path.startsWith("https://"))
-                    ? new URL(path).openStream()
-                    : new FileInputStream(path);
-            return new BufferedReader(new InputStreamReader(is));
-        }
+        InputStream is = path.startsWith("http://") || path.startsWith("https://")
+                ? new URL(path).openStream()
+                : new FileInputStream(path);
+        return new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+    }
 
-        /** Parses a JSON line; returns null and logs a warning on failure. */
-        private static JsonObject parseLine(String line) {
-            if (line == null || line.isBlank()) return null;
-            try (JsonReader reader = JSON_READER_FACTORY.createReader(new StringReader(line))) {
-                return reader.readObject();
-            } catch (Exception e) {
-                logger.warn("Skipping malformed JSON line: {}", e.getMessage());
-                return null;
-            }
+    /** Parses a JSON line; returns null and logs a warning on failure. */
+    private static JsonObject parseLine(String line) {
+        if (line == null || line.isBlank()) return null;
+        try (JsonReader reader = JSON_READER_FACTORY.createReader(new StringReader(line))) {
+            return reader.readObject();
+        } catch (Exception e) {
+            logger.warn("Skipping malformed JSON line: {}", e.getMessage());
+            return null;
         }
     }
 
-    /** Extracts author maps from a JSON array; returns an empty list if null. */
-    private static List<Map<String, Object>> extractAuthors(JsonArray authors) {
+    /**
+     * Extracts flat author rows from a JSON array.
+     * Each row includes a back-reference to the article (articleId) to allow
+     * a flat UNWIND in Cypher without nested objects (OOM fix).
+     */
+    private static List<Map<String, Object>> extractAuthors(String articleId, JsonArray authors) {
         List<Map<String, Object>> result = new ArrayList<>();
         if (authors == null) return result;
 
@@ -322,9 +353,10 @@ public class Example {
             if (id == null || id.isEmpty()) id = generateAuthorId(name, org);
 
             Map<String, Object> row = new HashMap<>();
-            row.put("id",   id);
-            row.put("name", name);
-            row.put("org",  org);
+            row.put("authorId",  id);
+            row.put("articleId", articleId);
+            row.put("name",      name);
+            row.put("org",       org);
             result.add(row);
         }
         return result;
@@ -335,8 +367,10 @@ public class Example {
         Set<String> refs = new HashSet<>();
         if (references != null) {
             for (JsonValue rv : references) {
-                String refId = rv.toString().replaceAll("^\"|\"$", "");
-                if (!refId.isEmpty()) refs.add(refId);
+                if (rv.getValueType() == JsonValue.ValueType.STRING) {
+                    String refId = ((JsonString) rv).getString();
+                    if (!refId.isEmpty()) refs.add(refId);
+                }
             }
         }
         return new ArrayList<>(refs);
