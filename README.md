@@ -79,13 +79,14 @@ The solution consists of two main kubernetes components:
 
 Those results are based on the first pod. The second pod was still running at the time of writing.
 
-| Information      | Description |
-| :--------------- | ----------- |
-| Nodes + Authored Relationships Time |   1,073 h   |
-| Nodes + Relationship Reference Time  | 4,9811111 h |
-| Nb Article Nodes |   6729828   |
-| Nb Author Nodes  |   5453927   |
-| Total Nodes      |  12183755   |
+| Information                         | Valeur        |
+| :---------------------------------- | :------------ |
+| Pass1: Nodes + Authored Relationships Time | 3862,8 s  |
+| Pass 1 + Relationship Reference Time | 17932,0 s |
+| Nb Article Nodes                    | 6729828       |
+| Nb Author Nodes                     | 5453927       |
+| Total Nodes                         | 12183755      |
+
 
 For the creation of all nodes:
 ```
