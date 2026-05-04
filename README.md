@@ -81,10 +81,23 @@ Those results are based on the first pod. The second pod was still running at th
 
 | Information      | Description |
 | :--------------- | ----------- |
-| Loading Time     | 4,9811111 h |
+| Nodes + Authored Relationships Time |   1,073 h   |
+| Nodes + Relationship Reference Time  | 4,9811111 h |
 | Nb Article Nodes |   6729828   |
 | Nb Author Nodes  |   5453927   |
 | Total Nodes      |  12183755   |
+
+For the creation of all nodes:
+```
+2026-05-03 22:58:29.145 [mse.advDB.Example.main()] INFO mse.advDB.Example - Loading started at: 2026-05-03T22:58:29.145896908Z
+
+... 
+
+2026-05-04 00:02:51.889 [Thread-3] INFO mse.advDB.Example - [PASS 1 Consumer] Finished – 6729828 articles committed
+```
+
+All nodes were fully created during this initial pass, completed in approximately 1 hour, 4 minutes, and 22.744 seconds. But the entire ingestion process, including the second pass, took approximately 4 hours, 58 minutes, and 6.666 seconds.
+
 
 The logs can be recovered using:
 
