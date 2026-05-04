@@ -400,10 +400,13 @@ public class Example {
 
     /** Opens a BufferedReader from a local path or HTTP(S) URL. */
     private static BufferedReader openReader(String path) throws IOException {
-        InputStream is = path.startsWith("http://") || path.startsWith("https://")
-                ? new URL(path).openStream()
-                : new FileInputStream(path);
-        return new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+        if (path.startsWith("http://") || path.startsWith("https://")) {
+            HttpURLConnection conn = (HttpURLConnection) new URL(path).openConnection();
+            conn.setConnectTimeout(60_000);   // 10s to establish connection
+            conn.setReadTimeout(240_000);     // 4min without data → reconnect
+            return new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
+        }
+        return new BufferedReader(new InputStreamReader(new FileInputStream(path), StandardCharsets.UTF_8));
     }
 
     /** Parses a JSON line; returns null and logs a warning on failure. */
