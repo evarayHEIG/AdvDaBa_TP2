@@ -18,7 +18,6 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.net.HttpURLConnection;
 
 import static org.neo4j.driver.Values.parameters;
 
@@ -58,7 +57,7 @@ public class Example {
         logger.info("Loading started at: {}", startTime);
 
         runPass1(driver, jsonPath, nbArticles, batchSize);
-        runPass2(driver, jsonPath, nbArticles, batchSize);
+        runPass2(driver, jsonPath, nbArticles, Math.max(1, batchSize / 3));
 
         logFinalStats(driver, startTime);
         driver.close();
@@ -105,61 +104,93 @@ public class Example {
         BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(4);
 
         Thread producer = new Thread(() -> {
-            try (BufferedReader br = openReader(jsonPath)) {
-                String line;
-                int count = 0;
+            final int MAX_RETRIES = 15;
+            int retries = 0;
+
+            Set<String> seenAuthors  = new HashSet<>();
+            Set<String> seenArticles = new HashSet<>();
+            int linesQueued    = 0;
+            int articlesQueued = 0;
+
+            while (retries <= MAX_RETRIES) {
+                int linesRead = linesQueued;
+                int count     = articlesQueued;
                 List<Map<String, Object>> batch = new ArrayList<>(batchSize);
-                // Track already-seen author IDs to use CREATE instead of MERGE
-                Set<String> seenAuthors  = new HashSet<>();
-                Set<String> seenArticles = new HashSet<>();
 
-                while ((line = br.readLine()) != null && count < nbArticles) {
-                    JsonObject obj = parseLine(line);
-                    if (obj == null) continue;
-
-                    String articleId = obj.getString("id", null);
-                    if (articleId == null || articleId.isEmpty()) continue;
-                    if (!seenArticles.add(articleId)) {
-                        logger.debug("Skipping duplicate article {}", articleId);
-                        continue;
+                try (BufferedReader br = openReader(jsonPath)) {
+                    // Skip already-processed lines – sets are already up to date
+                    for (int i = 0; i < linesQueued; i++) {
+                        if (br.readLine() == null) { queue.put(END_OF_STREAM); return; }
                     }
+                    if (retries > 0)
+                        logger.info("[PASS 1 Producer] Resuming from line {}", linesQueued);
 
-                    String title = obj.getString("title", "");
-                    if (title.length() > 500) title = title.substring(0, 500);
+                    String line;
+                    while ((line = br.readLine()) != null && count < nbArticles) {
+                        linesRead++;
+                        JsonObject obj = parseLine(line);
+                        if (obj == null) continue;
 
-                    List<Map<String, Object>> allAuthors  = extractAuthors(articleId, obj.getJsonArray("authors"));
-                    List<Map<String, Object>> newAuthors  = new ArrayList<>();
-                    for (Map<String, Object> author : allAuthors) {
-                        if (seenAuthors.add((String) author.get("id"))) {
-                            newAuthors.add(author);
+                        String articleId = obj.getString("id", null);
+                        if (articleId == null || articleId.isEmpty()) continue;
+                        if (!seenArticles.add(articleId)) {
+                            logger.debug("Skipping duplicate article {}", articleId);
+                            continue;
+                        }
+
+                        String title = obj.getString("title", "");
+                        if (title.length() > 500) title = title.substring(0, 500);
+
+                        List<Map<String, Object>> allAuthors = extractAuthors(articleId, obj.getJsonArray("authors"));
+                        List<Map<String, Object>> newAuthors = new ArrayList<>();
+                        for (Map<String, Object> author : allAuthors) {
+                            if (seenAuthors.add((String) author.get("id"))) {
+                                newAuthors.add(author);
+                            }
+                        }
+
+                        Map<String, Object> row = new HashMap<>();
+                        row.put("id",         articleId);
+                        row.put("title",      title);
+                        row.put("newAuthors", newAuthors);
+                        row.put("allAuthors", allAuthors);
+                        batch.add(row);
+
+                        if (++count % batchSize == 0)
+                            logger.info("[PASS 1 Producer] Read {} articles", count);
+
+                        if (batch.size() >= batchSize) {
+                            queue.put(new ArrayList<>(batch));
+                            linesQueued    = linesRead;
+                            articlesQueued = count;
+                            batch.clear();
                         }
                     }
 
-                    Map<String, Object> row = new HashMap<>();
-                    row.put("id",         articleId);
-                    row.put("title",      title);
-                    row.put("newAuthors", newAuthors);   // CREATE – only first occurrence
-                    row.put("allAuthors", allAuthors);   // MATCH  – for AUTHORED relations
-                    batch.add(row);
+                    if (!batch.isEmpty()) queue.put(batch);
+                    queue.put(END_OF_STREAM);
+                    logger.info("[PASS 1 Producer] Done – {} articles read, {} unique authors seen",
+                            count, seenAuthors.size());
+                    return;
 
-                    if (++count % batchSize == 0)
-                        logger.info("[PASS 1 Producer] Read {} articles", count);
-
-                    if (batch.size() >= batchSize) {
-                        queue.put(new ArrayList<>(batch));
-                        batch.clear();
-                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (IOException e) {
+                    retries++;
+                    long waitMs = 2000L * retries;
+                    logger.warn("[PASS 1 Producer] I/O error at line {} (queued up to line {}), retry {}/{} in {}ms: {}",
+                            linesRead, linesQueued, retries, MAX_RETRIES, waitMs, e.getMessage());
+                    try { Thread.sleep(waitMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                } catch (Exception e) {
+                    logger.error("[PASS 1 Producer] Fatal error: {}", e.getMessage(), e);
+                    break;
                 }
-
-                if (!batch.isEmpty()) queue.put(batch);
-                queue.put(END_OF_STREAM);
-                logger.info("[PASS 1 Producer] Done – {} articles read, {} unique authors seen",
-                        count, seenAuthors.size());
-
-            } catch (Exception e) {
-                logger.error("[PASS 1 Producer] Error: {}", e.getMessage(), e);
-                try { queue.put(END_OF_STREAM); } catch (InterruptedException ignored) {}
             }
+
+            if (retries > MAX_RETRIES)
+                logger.error("[PASS 1 Producer] Max retries ({}) exceeded, aborting pass 1", MAX_RETRIES);
+            try { queue.put(END_OF_STREAM); } catch (InterruptedException ignored) {}
         });
 
         Thread consumer = new Thread(() -> {
@@ -235,38 +266,36 @@ public class Example {
         BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(4);
 
         Thread producer = new Thread(() -> {
-            final int MAX_RETRIES = 15;
-            int retries = 0;
-            int linesQueued = 0;
-            int articlesQueued = 0;
+            int maxRetries = 5;
+            int attempt = 0;
+            int[] linesRead = {0};
 
-            while (retries <= MAX_RETRIES) {
-                int linesRead = linesQueued;
-                int count = articlesQueued;
-                List<Map<String, Object>> batch = new ArrayList<>(batchSize);
-
+            while (attempt < maxRetries) {
                 try (BufferedReader br = openReader(jsonPath)) {
-                    // Resume after last committed checkpoint
-                    for (int i = 0; i < linesQueued; i++) {
-                        if (br.readLine() == null) {
-                            // File shorter than checkpoint – already done
-                            queue.put(END_OF_STREAM);
-                            return;
-                        }
-                    }
-
                     String line;
+                    // Skip already-processed lines on retry
+                    int skipped = 0;
+                    while (skipped < linesRead[0] && (line = br.readLine()) != null) skipped++;
+                    if (attempt > 0)
+                        logger.info("[PASS 2 Producer] Resuming from line {}", linesRead[0]);
+
+                    List<Map<String, Object>> batch = new ArrayList<>(batchSize);
+                    int count = 0;
+
                     while ((line = br.readLine()) != null && count < nbArticles) {
-                        linesRead++;
+                        linesRead[0]++;
                         JsonObject obj = parseLine(line);
                         if (obj == null) continue;
 
                         String articleId = obj.getString("id", null);
                         if (articleId == null || articleId.isEmpty()) continue;
 
+                        List<String> refs = extractReferences(obj.getJsonArray("references"));
+                        if (refs.isEmpty()) continue;
+
                         Map<String, Object> row = new HashMap<>();
                         row.put("id", articleId);
-                        row.put("references", extractReferences(obj.getJsonArray("references")));
+                        row.put("references", refs);
                         batch.add(row);
 
                         if (++count % batchSize == 0)
@@ -274,8 +303,6 @@ public class Example {
 
                         if (batch.size() >= batchSize) {
                             queue.put(new ArrayList<>(batch));
-                            linesQueued = linesRead;
-                            articlesQueued = count;
                             batch.clear();
                         }
                     }
@@ -285,24 +312,21 @@ public class Example {
                     logger.info("[PASS 2 Producer] Done – {} articles read", count);
                     return;
 
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
                 } catch (IOException e) {
-                    retries++;
-                    long waitMs = 2000L * retries;
-                    logger.warn("[PASS 2 Producer] I/O error at line {} (queued up to line {}), retry {}/{} in {}ms: {}",
-                            linesRead, linesQueued, retries, MAX_RETRIES, waitMs, e.getMessage());
-                    try { Thread.sleep(waitMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                    attempt++;
+                    logger.warn("[PASS 2 Producer] IO error (attempt {}/{}): {}", attempt, maxRetries, e.getMessage());
+                    if (attempt >= maxRetries) {
+                        logger.error("[PASS 2 Producer] Max retries reached, aborting");
+                        try { queue.put(END_OF_STREAM); } catch (InterruptedException ignored) {}
+                    } else {
+                        try { Thread.sleep(3000L * attempt); } catch (InterruptedException ignored) {}
+                    }
                 } catch (Exception e) {
                     logger.error("[PASS 2 Producer] Fatal error: {}", e.getMessage(), e);
-                    break;
+                    try { queue.put(END_OF_STREAM); } catch (InterruptedException ignored) {}
+                    return;
                 }
             }
-
-            if (retries > MAX_RETRIES)
-                logger.error("[PASS 2 Producer] Max retries ({}) exceeded, aborting pass 2", MAX_RETRIES);
-            try { queue.put(END_OF_STREAM); } catch (InterruptedException ignored) {}
         });
 
         Thread consumer = new Thread(() -> {
@@ -376,13 +400,10 @@ public class Example {
 
     /** Opens a BufferedReader from a local path or HTTP(S) URL. */
     private static BufferedReader openReader(String path) throws IOException {
-        if (path.startsWith("http://") || path.startsWith("https://")) {
-            HttpURLConnection conn = (HttpURLConnection) new URL(path).openConnection();
-            conn.setConnectTimeout(10_000);
-            conn.setReadTimeout(240_000);
-            return new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
-        }
-        return new BufferedReader(new InputStreamReader(new FileInputStream(path), StandardCharsets.UTF_8));
+        InputStream is = path.startsWith("http://") || path.startsWith("https://")
+                ? new URL(path).openStream()
+                : new FileInputStream(path);
+        return new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
     }
 
     /** Parses a JSON line; returns null and logs a warning on failure. */
