@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config-2
+  namespace: ray-ste-adv-daba-26
+data:
+  JSON_FILE: "http://vmrum.isc.heia-fr.ch/files/DBLP-Citation-network-V18.jsonl"
+  BATCH_SIZE: "15000"
+  NEO4J_IP: "neo4j-2"
+  NEO4J_PORT: "7687"
+  JAVA_TOOL_OPTIONS: "-Xmx2500m -Xms512m -XX:+UseG1GC"

@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: app-2
+  namespace: ray-ste-adv-daba-26
+  labels:
+    app: advdb-app-2
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: advdb-app-2
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: app-2
+        image: ghcr.io/evarayheig/advdaba-tp2:latest
+        imagePullPolicy: Always
+        envFrom:
+        - configMapRef:
+            name: app-config-2
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "3Gi"
+            cpu: "2000m"
+      initContainers:
+      - name: wait-for-neo4j
+        image: busybox:1.28
+        command: ['sh', '-c', 'until nc -z neo4j 7687; do echo waiting for neo4j...; sleep 2; done;']

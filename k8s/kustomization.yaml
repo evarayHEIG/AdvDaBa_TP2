@@ -6,6 +6,7 @@ resources:
   - neo4j-configmap.yaml
   - neo4j-deployment.yaml
   - neo4j-service.yaml
+  - neo4j-ingress.yaml
   - app-configmap.yaml
   - app-deployment.yaml
 
