@@ -58,7 +58,7 @@ public class Example {
         logger.info("Loading started at: {}", startTime);
 
         runPass1(driver, jsonPath, nbArticles, batchSize);
-        runPass2(driver, jsonPath, nbArticles, Math.max(1, batchSize / 3));
+        runPass2(driver, jsonPath, nbArticles, batchSize);
 
         logFinalStats(driver, startTime);
         driver.close();
@@ -267,7 +267,7 @@ public class Example {
         BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(4);
 
         Thread producer = new Thread(() -> {
-            int maxRetries = 5;
+            int maxRetries = 150;
             int attempt = 0;
             int[] linesRead = {0};
 
