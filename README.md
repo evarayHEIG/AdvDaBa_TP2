@@ -28,18 +28,33 @@ The solution implements a batched, two-pass ingestion pipeline from DBLP JSONL t
 
 A two-pass approach is used to handle the interdependencies between articles and authors:
 
-- **Pass 1:** create/merge `Article` and `Author` nodes, then create `AUTHORED` edges.
+- **Pass 1:** create `Article` and `Author` nodes, then create `AUTHORED` edges.
 - **Pass 2:** create `CITES` edges, if the cited article exists. 
 - Each pass uses a producer-consumer pattern (2 threads): the producer parses JSONL and builds batches while the consumer commits each batch as a Neo4j transaction.
 
 ### Performance and reliability choices
 
-- Batched writes are used to reduce transaction overhead and improve throughput. The used batch size is 15'000 but can be configured via the `BATCH_SIZE` environment variable.
-- `ON CREATE`/`ON MATCH` is used to reduce unnecessary updates while preserving idempotent behavior.
-- A bounded `LinkedBlockingQueue` provides backpressure and limits memory growth.
-- Uniqueness constraints on `_id` prevent duplicates and accelerate lookups since an index is created on any property with a uniqueness constraint by default.
-- To avoid using `MERGE`, a local cache of existing article ids is maintained during the second pass to check for the existence of cited articles before creating `CITES` edges. This is more efficient than using `MERGE` for each cited article, which would require a database lookup for each citation.
-- Runtime behavior is controlled by environment variables (`JSON_FILE`, `MAX_NODES`, `BATCH_SIZE`).
+* Batched writes are used to reduce transaction overhead and improve throughput.
+
+  * The batch size is primarily set to 15,000, but additional tests were conducted during the second pass to avoid `EOF` errors. The batch size can be configured via the `BATCH_SIZE` environment variable.
+
+* `ON CREATE` / `ON MATCH` clauses are used to minimize unnecessary updates while preserving idempotent behavior.
+
+* A bounded `LinkedBlockingQueue` provides backpressure and limits memory growth.
+
+* Uniqueness constraints on `_id` prevent duplicates and accelerate lookups, as an index is automatically created for any property with a uniqueness constraint.
+
+* To avoid using `MERGE`, a local cache of existing article IDs is maintained during the first pass to check for the existence of articles and authors. This approach is potentially risky, as it can exhaust the application heap during this phase. However, monitoring shows that the heap limit is reached without causing a failure:
+
+```
+Eden:    696 MB | Old:   1672 MB | Total heap:   2668 MB | YGC: 35008.0 | FGC: 4544.0
+```
+
+After the first pass, heap usage decreases significantly because the garbage collector reclaims memory from structures that are no longer in use. During the second pass, sufficient memory is available.
+
+* To further avoid `MERGE`, before creating `CITES` relationships, duplicate references (i.e., multiple occurrences of the same citation from one article to another) are removed. This is more efficient than using `MERGE` for each cited article, which would require a database lookup per citation.
+
+* Runtime behavior is controlled via environment variables (`JSON_FILE`, `MAX_NODES`, `BATCH_SIZE`).
 
 ## Steps to deploy the solution
 
@@ -50,6 +65,7 @@ Before deploying, the yaml configuration file of the cluster must be retrieved f
 Then, the following commands can be used to deploy or delete the solution:
 
 ```bash
+export KUBECONFIG="k8s/local.yaml"
 kubectl apply -k k8s/ # deploy the solution
 kubectl delete -k k8s/ # to delete the deployed resources
 ```
