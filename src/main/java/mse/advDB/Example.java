@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.net.URL;
+import java.net.HttpURLConnection;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
