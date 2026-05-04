@@ -234,7 +234,7 @@ public class Example {
         BlockingQueue<List<Map<String, Object>>> queue = new LinkedBlockingQueue<>(4);
 
         Thread producer = new Thread(() -> {
-            final int MAX_RETRIES = 5;
+            final int MAX_RETRIES = 15;
             int retries = 0;
             int linesQueued = 0;
             int articlesQueued = 0;
