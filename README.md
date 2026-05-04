@@ -9,9 +9,9 @@
 | Group ID          | RayStefaniAdvDaBa26                       |
 | Names             | Massimo Stefani, Eva Ray                  |
 | Namespace         | ray-ste-adv-daba-26                       |
-| Neo4j pod id      |                                           |
+| Neo4j pod id      | neo4j-2-85b4d7ff8-qh9gg, neo4j-3-65df764f45-x98sf |
 | Neo4j credentials | Username: neo4j, Password: test           |
-| Insert pod id     |                                           |
+| Insert pod id     | app-2-rwxrf, app-3-4gllg                  |
 | Git repository    | https://github.com/evarayHEIG/AdvDaBa_TP2 |
 
 ## Solution
@@ -77,15 +77,40 @@ The solution consists of two main kubernetes components:
 ## Results
 <!-- The loading time, in seconds, it took to load N + K nodes (N articles, K authors) together with an explanation of how this time can be recovered from the logs -->
 
+Those results are based on the first pod. The second pod was still running at the time of writing.
+
 | Information      | Description |
 | :--------------- | ----------- |
-| Loading Time     |             |
-| Nb Article Nodes |             |
-| Nb Author Nodes  |             |
-| Total Nodes      |             |
+| Loading Time     | 4,9811111 h |
+| Nb Article Nodes |   6729828   |
+| Nb Author Nodes  |   5453927   |
+| Total Nodes      |  12183755   |
 
 The logs can be recovered using:
 
 ```bash
-kubectl logs <pod_name> -n ray-ste-adv-daba-26
+kubectl logs app-2-rwxrf -n ray-ste-adv-daba-26
 ```
+
+For the pod that is still running:
+```bash
+kubectl logs app-3-4gllg -n ray-ste-adv-daba-26
+```
+
+### Analysis
+
+Both passes were tested with a batch size of 15,000. During the first run, we set a maximum of 5 retries for the entire ingestion. This proved insufficient: the second pass eventually exhausted its retry budget and aborted. To address this, we increased the retry limit specifically for the second pod, but it had not completed at the time of writing.
+
+The graphs below show the time between commits (y-axis) as a function of the number of rows written (x-axis) for each pass.
+
+**Pass 1 — commit times**
+
+![Pass 1 commit times](images/log_insert_pass_1_commit_times.png)
+
+**Pass 2 — commit times**
+
+![Pass 2 commit times](images/log_insert_pass_2_commit_times.png)
+
+For the first pass, up to approximately 2 million rows, writes are fast and consistent, reflecting stable Neo4j conditions with no contention or memory pressure. Beyond that point, commit times rise in a broadly linear trend but with pronounced spikes. These spikes indicate moments of significantly higher latency, likely driven by garbage collection pauses, growing index maintenance cost, or network instability. The sharpest spikes, particularly toward the end of each pass, correspond to transaction timeouts that triggered retries.
+
+For the second pass, seen that the DB has already been populated with all nodes, commit times are generally much higher and more variable. This is expected, as the second pass involves more complex operations (checking for existing nodes and creating relationships) that are more sensitive to database load and memory conditions. The DB must keep all nodes in memory to match cited articles, which likely contributes to increased garbage collection activity and longer commit times. The spikes in the second pass are more frequent and pronounced, reflecting the increased complexity and load on the database.
