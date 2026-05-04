@@ -42,3 +42,5 @@ neo4j_mount/logs/
 *.tmp
 *.swp
 *.swo
+
+__pycache__/
